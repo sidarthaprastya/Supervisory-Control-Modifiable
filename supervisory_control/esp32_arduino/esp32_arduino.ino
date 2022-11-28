@@ -1,38 +1,40 @@
 #include <Wire.h> 
 #include <LiquidCrystal_I2C.h>
+#include <EEPROM.h>
 
 #include "fsm.h"
 
-#define BUTTON_MODE   15
-#define BUTTON_SHIFT  2
-#define BUTTON_UP     4
-#define POTENTIO      5
+#define PIN_BUTTON_MODE   15
+#define PIN_BUTTON_SHIFT  2
+#define PIN_BUTTON_ADD    5
+#define PIN_POTENTIO      4
 
 LiquidCrystal_I2C lcd(0x27,20,4);  // set the LCD address to 0x27 for a 16 chars and 2 line display
 
 // BUTTON INPUT SIGNAL
-int button_left = 0, button_right = 0, button_mode = 0;
+int button_mode = 0, button_shift = 0, button_add = 0;
 
-// DEBOUNCE SIGNAL
-int count_deb_left = 0, count_deb_right = 0, count_deb_mode = 0;
-int state_deb_left = 0, state_deb_right = 0, state_deb_mode = 0;
-int deb_left = 0, deb_right = 0, deb_mode = 0;
+// DEBOUNCER SIGNAL
+int count_deb_shift = 0, count_deb_add = 0, count_deb_mode = 0;
+int state_deb_shift = STATE_DETECT, state_deb_add = STATE_DETECT, state_deb_mode = STATE_DETECT;
+int deb_shift = 0, deb_add = 0, deb_mode = 0;
 
-// EDGE-DETECTOR SIGNAL
-int state_edge_left = 0, state_edge_right = 0, state_edge_mode = 0;
-int edge_left = 0, edge_right = 0, edge_mode = 0;
-
-// HOLD-COUNTER SIGNAL
-int count_hold_left = 0, count_hold_right = 0, count_hold_mode = 0;
-int lim_alarm_left = 0, lim_alarm_right = 0, lim_alarm_mode = 0;
-int out_hold_left = 0, out_hold_right = 0, out_hold_mode = 0;
-int state_hold_left = 0, state_hold_right = 0, state_hold_mode = 0;
-
-// FSM MODE SIGNAL
+// FSM_MODE SIGNAL
 int state_mode = MODE_START;
+int counter_mode = 0;
+
+// FSM_NUM_SHIFT SIGNAL
+int state_num_shift = BLOCK_1;
+
+
 
 // PARAMETER
-float Kp = 1.0, Ki = 0.0, Kd = 0.0;
+float Kp, Ki, Kd;
+
+// NUM_ADD SIGNAL
+int num_block_p[4] = {0, 0, 0, 0};
+int num_block_i[4] = {0, 0, 0, 0};
+int num_block_d[4] = {0, 0, 0, 0};
 
 // PID VAR
 float integral = 0;
@@ -44,6 +46,8 @@ float setpoint = 0.0;
 // COMMUNICATION WITH MOTOR
 int next_valid = 0;
 float motor_out = 0.0, pid_out = 0.0;
+String buff;
+int available = 0;
 
 void pid(float input, float *output, float setpoint, float kp, float ki, float kd, float time){
   
@@ -52,117 +56,212 @@ void pid(float input, float *output, float setpoint, float kp, float ki, float k
     float deriv = (last_err - error)/time;
     last_err = error;
     *output = kp * error + ki * integral + kd * deriv;
+
+//    if(*output > 200.00){
+//      *output = 200.00;
+//    }
+//    else if(*output < -200.00){
+//      *output = -200.00;
+//    }
 }
 
+void read_eeprom(){
+  Kp = EEPROM.read(0);
+  Ki = EEPROM.read(1);
+  Kd = EEPROM.read(2);
+
+  for(int z=0; z<4; z++){
+    num_block_p[z] = EEPROM.read(3+z);
+  }
+  for(int z=0; z<4; z++){
+    num_block_i[z] = EEPROM.read(7+z);
+  }
+  for(int z=0; z<4; z++){
+    num_block_d[z] = EEPROM.read(11+z);
+  }
+}
+
+void write_eeprom(){
+  EEPROM.writeFloat(0, Kp);
+  EEPROM.writeFloat(1, Ki);
+  EEPROM.writeFloat(2, Kd);
+
+  for(int z=0; z<4; z++){
+    EEPROM.write(3+z, num_block_p[z]);
+  }
+
+  for(int z=0; z<4; z++){
+    EEPROM.write(7+z, num_block_i[z]);
+  }
+
+  for(int z=0; z<4; z++){
+    EEPROM.write(11+z, num_block_d[z]);
+  }
+}
 
 void setup() {
+  EEPROM.begin(64);
+  read_eeprom();
+  param_assign(num_block_p, num_block_i, num_block_d, &Kp, &Ki, &Kd);
   lcd.init();
   lcd.backlight();
   Serial.begin(115200);
-  pinMode(BUTTON_MODE, INPUT);
-  pinMode(BUTTON_SHIFT, INPUT);
-  pinMode(BUTTON_UP, INPUT);
-  pinMode(POTENTIO, INPUT);
+  pinMode(PIN_BUTTON_MODE, INPUT_PULLUP);
+  pinMode(PIN_BUTTON_SHIFT, INPUT_PULLUP);
+  pinMode(PIN_BUTTON_ADD, INPUT_PULLUP);
+  pinMode(PIN_POTENTIO, INPUT);
   
   // Task untuk button pada core 0
-  xTaskCreatePinnedToCore(button_task, "Button Task", 2048, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(button_task, "Button Task", 2048, NULL, 2, NULL, 0);
   xTaskCreatePinnedToCore(display_task, "Display Task", 2048, NULL, 1, NULL, 0);
     // Task untuk kontrol PID pada core 1
   xTaskCreatePinnedToCore(main_control, "Main Task", 2048, NULL, 1, NULL, 1);
-  xTaskCreatePinnedToCore(main_config, "Main Config Task", 2048, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(main_config, "Main Config Task", 2048, NULL, 2, NULL, 0);
+}
+
+void animate_shift(int mode, int shift_block, int num_block[4]){
+    int y = 3;
+    int dot_pos;
+    switch(mode){
+        case MODE_P:
+            dot_pos = 3;
+            break;
+        
+        case MODE_I:
+            dot_pos = 2;
+            break;
+        
+        case MODE_D:
+            dot_pos = 2;
+            break;
+        
+        default:
+            break;
+    }
+    for(int x = 0; x < 5; x++){
+        lcd.setCursor(6 + x, 0);
+        if(x == dot_pos){
+            lcd.print(".");
+        }
+        else{
+            lcd.print(num_block[y]);
+            if(y == shift_block){
+                lcd.setCursor(6 + x, 1);
+                lcd.print("^");
+            }
+            y--;
+        }
+    }
 }
 
 void display_task(void *pvParam){
   while(1){
     TickType_t xLastWakeTime = xTaskGetTickCount();
+//    Serial.println(button_add);
     switch(state_mode){
       case MODE_START:
         lcd.clear();
-        lcd.setCursor(3,0);
-        lcd.print("SETPOINT: ");
+        lcd.setCursor(0,0);
+        lcd.print("SET: ");
+        lcd.setCursor(6,0);
+//        lcd.print(setpoint);
+        lcd.print(buff);
+        lcd.setCursor(6,1);
+        lcd.print(pid_out);
+        lcd.setCursor(11,1);
+        lcd.print(setpoint);
         break;
 
       case MODE_P:
         lcd.clear();
-        lcd.setCursor(3,0);
+        lcd.setCursor(0,0);
         lcd.print("P: ");
+        animate_shift(MODE_P, state_num_shift, num_block_p);
         break;
 
       case MODE_I:
         lcd.clear();
-        lcd.setCursor(3,0);
+        lcd.setCursor(0,0);
         lcd.print("I: ");
+        animate_shift(MODE_I, state_num_shift, num_block_i);
         break;
         
       case MODE_D:
         lcd.clear();
-        lcd.setCursor(3,0);
+        lcd.setCursor(0,0);
         lcd.print("D: ");
+        animate_shift(MODE_D, state_num_shift, num_block_d);
+        break;
+      
+      default:
         break;
     }
-    vTaskDelayUntil(&xLastWakeTime, 100/portTICK_PERIOD_MS);
+    
+    vTaskDelay(100/portTICK_PERIOD_MS);
   }
 }
 
 void button_task(void *pvParam){
   while(1){
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    // timer_get_counter_time_sec(0, 0, &current_time_sec);
-      //  if (gpio_get_level(GPIO_INPUT_PB) == 0 && (current_time_sec - last_time_sec > DELAY_S)) {
-        //    button = 1;
-        //    //start_program = 1;
-    //      timer_get_counter_time_sec(0, 0, &last_time_sec);
-      //  }
-
-        if(digitalRead(BUTTON_SHIFT)==0){
-            button_left = 1;
+        if(digitalRead(PIN_BUTTON_SHIFT)==0){
+            button_shift = READ_SHIFT;
         }
         else{
-            button_left = 0;
+            button_shift = 0;
         }
 
-        if(digitalRead(BUTTON_UP == 0)){
-            button_right = 1;
+        if(digitalRead(PIN_BUTTON_ADD) == 0){
+            button_add = READ_ADD;
         }
         else{
-            button_right = 0;
+            button_add = 0;
         }
 
-        if(digitalRead(BUTTON_MODE) == 0){
-            button_mode = 1;
+        if(digitalRead(PIN_BUTTON_MODE) == 0){
+            button_mode = READ_MODE;
         }
         else{
             button_mode = 0;
         }
 
-    vTaskDelay(100/portTICK_PERIOD_MS);
+        setpoint = map(analogRead(PIN_POTENTIO), 200, 4095, 0, 100);
+
+    vTaskDelay(50/portTICK_PERIOD_MS);
   }
 }
 
 void main_control(void *pvParam){
   while(1){
     TickType_t xLastWakeTime1 = xTaskGetTickCount();
-
-        // Membaca data dari desktop agar bisa lanjut
-        while(Serial.available()>0){
-          motor_out = Serial.read();
-        }
-//        if(scanf("%f", &motor_out) > 0){
-//            next_valid = 1;
-//        }
-
+      
+      while(Serial.available()>0){
+        buff = Serial.readStringUntil(';');
+        
+//        motor_out = Serial.parseFloat();
+        available = 1;
+//        Serial.read();
+        Serial.flush();
+//        break;
+      }
+      if (available == 1){
+        motor_out = buff.toFloat();
         // Dijalankan setelah pembacaan berhasil
-        if(next_valid == 1 ){
-            pid(motor_out, &pid_out, setpoint, Kp, Ki, Kd, 0.01);
-
-            // Mengirimkan sel dan output_pid ke desktop
-            Serial.println(pid_out);
-//            Serial.print(
-//            printf("%d;%.8f\r\n", sel, output_pid);
-            
-            next_valid = 0;
+        pid(motor_out, &pid_out, setpoint, Kp, Ki, Kd, 0.01);
+        if(state_mode != MODE_START){
+          setpoint = 0;
+          pid_out = 0;
         }
-        vTaskDelayUntil(&xLastWakeTime1, 30/portTICK_PERIOD_MS);
+        // Mengirimkan output_pid ke desktop
+        Serial.println(pid_out);
+//        Serial.println(";");
+        available = 0;
+
+        
+      }
+      
+       vTaskDelay(50/portTICK_PERIOD_MS);
+      
   }
 }
 
@@ -170,13 +269,38 @@ void main_config(void *pvParam){
   while(1){
     TickType_t xLastWakeTime1 = xTaskGetTickCount();
 
-    debounce(button_mode, &count_deb_mode, &state_deb_mode, &deb_mode);
-    edge_detect(button_mode, deb_mode, &state_edge_mode, &edge_mode);
-    hold_counter(edge_mode, MODE, 100, &count_hold_mode, &state_hold_mode, &out_hold_mode, &lim_alarm_mode);
+    debouncer_fsm(button_mode, 20, 20, START_FLAG, &count_deb_mode, &state_deb_mode, &deb_mode);
+    debouncer_fsm(button_shift, 10, 2, READ_SHIFT, &count_deb_shift, &state_deb_shift, &deb_shift);
+    debouncer_fsm(button_add, 10, 2, READ_ADD, &count_deb_add, &state_deb_add, &deb_add);
 
-    fsm_mode(lim_alarm_mode, lim_alarm_mode, &state_mode);
-    
-    vTaskDelayUntil(&xLastWakeTime1, 50/portTICK_PERIOD_MS);
+    fsm_mode(deb_mode, &state_mode);
+    if(state_mode != MODE_START){
+      fsm_num_shift(deb_shift, &state_num_shift);
+      switch(state_mode){
+        case MODE_P:
+          num_add(deb_add, state_num_shift, num_block_p);
+          break;
+        
+        case MODE_I:
+          num_add(deb_add, state_num_shift, num_block_i);
+          break;
+        
+        case MODE_D:
+          num_add(deb_add, state_num_shift, num_block_d);
+          break;
+        
+        default:
+          break;
+      }
+    }
+
+    if(deb_mode == START_FLAG){
+      param_assign(num_block_p, num_block_i, num_block_d, &Kp, &Ki, &Kd);
+      write_eeprom();
+      EEPROM.commit();
+    }
+
+    vTaskDelay(100/portTICK_PERIOD_MS);
   }
 }
 
