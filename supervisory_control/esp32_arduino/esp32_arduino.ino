@@ -26,8 +26,6 @@ int counter_mode = 0;
 // FSM_NUM_SHIFT SIGNAL
 int state_num_shift = BLOCK_1;
 
-
-
 // PARAMETER
 float Kp, Ki, Kd;
 
@@ -57,12 +55,6 @@ void pid(float input, float *output, float setpoint, float kp, float ki, float k
     last_err = error;
     *output = kp * error + ki * integral + kd * deriv;
 
-//    if(*output > 200.00){
-//      *output = 200.00;
-//    }
-//    else if(*output < -200.00){
-//      *output = -200.00;
-//    }
 }
 
 void read_eeprom(){
@@ -97,6 +89,7 @@ void write_eeprom(){
   for(int z=0; z<4; z++){
     EEPROM.write(11+z, num_block_d[z]);
   }
+  EEPROM.commit();
 }
 
 void setup() {
@@ -111,7 +104,7 @@ void setup() {
   pinMode(PIN_BUTTON_ADD, INPUT_PULLUP);
   pinMode(PIN_POTENTIO, INPUT);
   
-  // Task untuk button pada core 0
+  // Task untuk button dan display pada core 0
   xTaskCreatePinnedToCore(button_task, "Button Task", 2048, NULL, 2, NULL, 0);
   xTaskCreatePinnedToCore(display_task, "Display Task", 2048, NULL, 1, NULL, 0);
     // Task untuk kontrol PID pada core 1
@@ -157,18 +150,13 @@ void animate_shift(int mode, int shift_block, int num_block[4]){
 void display_task(void *pvParam){
   while(1){
     TickType_t xLastWakeTime = xTaskGetTickCount();
-//    Serial.println(button_add);
+
     switch(state_mode){
       case MODE_START:
         lcd.clear();
         lcd.setCursor(0,0);
         lcd.print("SET: ");
         lcd.setCursor(6,0);
-//        lcd.print(setpoint);
-        lcd.print(buff);
-        lcd.setCursor(6,1);
-        lcd.print(pid_out);
-        lcd.setCursor(11,1);
         lcd.print(setpoint);
         break;
 
@@ -237,12 +225,9 @@ void main_control(void *pvParam){
       
       while(Serial.available()>0){
         buff = Serial.readStringUntil(';');
-        
-//        motor_out = Serial.parseFloat();
+
         available = 1;
-//        Serial.read();
         Serial.flush();
-//        break;
       }
       if (available == 1){
         motor_out = buff.toFloat();
@@ -253,15 +238,14 @@ void main_control(void *pvParam){
           pid_out = 0;
         }
         // Mengirimkan output_pid ke desktop
+        Serial.print(setpoint);
+        Serial.print(";");
         Serial.println(pid_out);
-//        Serial.println(";");
-        available = 0;
-
         
+        available = 0;
       }
       
        vTaskDelay(50/portTICK_PERIOD_MS);
-      
   }
 }
 
@@ -297,7 +281,7 @@ void main_config(void *pvParam){
     if(deb_mode == START_FLAG){
       param_assign(num_block_p, num_block_i, num_block_d, &Kp, &Ki, &Kd);
       write_eeprom();
-      EEPROM.commit();
+      
     }
 
     vTaskDelay(100/portTICK_PERIOD_MS);
